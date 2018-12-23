@@ -1,0 +1,397 @@
+///
+// Smpl_UART0_RFID : read card serail number using compact command
+//
+// RFID module
+// comm port = 9600, N, 1, 8, 1
+// pin1 : GND   to GND
+// pin2 : VCC   to Vcc +5V
+// pin3 : RXD   to NUC140 UART0-TX (GPB1)
+// pin4 : TXD   to NUC140 UART0-RX (GPB0)
+//
+// compact command (1 byte)
+// 0x01 : Search Card
+// 0x02 : Read the card serial number
+// 0x03 : Record the card's serial number into an authorization list
+// 0x04 : check if a card is in authorization list
+// 0x05 : Remove a card's serial number from authorization list
+
+#include <stdio.h>
+#include "NUC1xx.h"
+#include "Driver\DrvUART.h"
+#include "Driver\DrvGPIO.h"
+#include "Driver\DrvSYS.h"
+#include "Driver\DrvSPI.h"
+#include "Driver\DrvI2C.h"
+#include "LCD_Driver.h"
+#include "LCD1602.h"
+#include "RC522.h"
+
+
+void PcdAntennaOn();	
+void Auto_Reader();
+int RFID_Reader();
+void Init_SPI();
+void Init_GPIO();
+void Init_RFID();
+void RGBLED_CONTROL(char Red, char Green, char Blue);
+void RGBLEDMOD_CONTROL(char Red, char Green, char Blue);
+void Confirm_Callback(void);
+void Deny_Callback(void);
+void Relay();
+void char_to_string();
+int Comparison_UID_DataBase();
+
+
+
+unsigned char UID[4],Temp[4]                                       ;
+unsigned char RF_Buffer[18]                                        ;
+unsigned char Password_Buffer[6]={0xFF,0xFF,0xFF,0xFF,0xFF,0xFF}   ; // Mifare One ????
+
+char          MBRX[30]                                             ;
+char          MBKeyTP[30]                                          ;
+char          Event                                                ;
+unsigned char DISP_MODE,i                                            ; // ????????
+unsigned char des_on       = 0                                     ; // DES????
+int flag=0;
+char Text[16];
+
+struct RFIDTag {    // 定義結構
+   unsigned char uid[4];
+   char *name;
+};
+ 
+struct RFIDTag tags[] = {  // 初始化結構資料 10進位儲存!!
+   //{000,000,000,000}, "example"
+   {{206,236,134,91}, "card1"},
+   {{109,28,223,43}, "card2"},
+};
+unsigned char totalTags = sizeof(tags) / sizeof(struct RFIDTag);
+int UID_DataBase_flag=0;
+char UID_TEMP[16];
+char UID_TEMP_DATABASE[16];
+
+int32_t main()
+{
+  
+  char Text1[16];
+    UNLOCKREG();
+    DrvSYS_Open(48000000);
+    LOCKREG();
+    
+    Init_SPI();  // initialize SPI0
+    Init_GPIO();
+    Init_RFID();
+      
+    DrvGPIO_Open(E_GPA, 10, E_IO_OUTPUT);
+    DrvGPIO_Open(E_GPA, 15, E_IO_OUTPUT);
+    DrvGPIO_ClrBit(E_GPA,15);
+    Initial_pannel();
+    clr_all_pannal();
+    print_lcd(0,"Welcome!!");  
+    
+    do{
+      if(RFID_Reader()==1){ 
+        if(Comparison_UID_DataBase()==1){
+          Relay();
+          Confirm_Callback();
+        }
+        else{
+          Deny_Callback();
+        }
+
+      }
+      else{ 
+        //print_lcd(0,"                  ");
+        print_lcd(1,"                  ");
+        print_lcd(2,"No Card      ");
+      
+      }
+      
+    }while(1);
+    
+    
+    //Auto_Reader();
+    
+    /*while(1){	
+    Auto_Reader();
+    if(flag==1){
+    sprintf(Text,"%x%x%x%x", UID[0],UID[1],UID[2],UID[3]);
+    print_lcd(3,Text);}}*/
+    
+    
+    
+}
+void Init_SPI()
+{
+        //Step 1. Enable and Select SPI clock source
+	SYSCLK->APBCLK.SPI0_EN =1;
+	SYS->IPRSTC2.SPI0_RST =1;
+	SYS->IPRSTC2.SPI0_RST =0;
+	
+	//Step 2. GPIO initial
+	SYS->GPCMFP.SPI0_SS0_I2SLRCLK =1;
+	SYS->GPCMFP.SPI0_CLK_I2SBCLK =1;
+	SYS->GPCMFP.SPI0_MISO0_I2SDI =1;
+	SYS->GPCMFP.SPI0_MOSI0_I2SDO =1;	
+	
+	//Step 3. Set SCLK 
+	SPI0->DIVIDER.DIVIDER =4;//HCLK/(DIVIDER+1) = 22.1184Mhz/(4+1) = 4.42568Mhz   
+
+	//Step 4. Select Operation mode
+	SPI0->CNTRL.SLAVE = 0; //Master mode
+	SPI0->CNTRL.LSB = 0; //MSB
+	SPI0->CNTRL.TX_BIT_LEN = 8; //Length:8 bit
+	SPI0->CNTRL.CLKP = 0; //SCLK idle high
+	SPI0->CNTRL.TX_NEG = 1; //Change SDO on falling edge of SCLK
+	SPI0->CNTRL.RX_NEG = 0; //Latch SDI on rising edge of SCLK
+	SPI0->SSR.AUTOSS = 0; //Disable automatic slave select
+	SPI0->SSR.SS_LVL = 0; //SS low active
+	// SPI0->SSR.SSR = 1; //SPI0_SS0
+  
+  /*
+	// Configure SPI1 as a master to access RC522
+        DrvSPI_SetBitLength(eDRVSPI_PORT1, 8);
+	DrvSPI_Open(eDRVSPI_PORT1, eDRVSPI_MASTER, eDRVSPI_TYPE1, 8);
+	DrvSPI_SetEndian(eDRVSPI_PORT1, eDRVSPI_MSB_FIRST);
+	DrvSPI_DisableAutoSS(eDRVSPI_PORT1);
+	DrvSPI_SetSlaveSelectActiveLevel(eDRVSPI_PORT1, eDRVSPI_ACTIVE_LOW_RISING);
+	//DrvSPI_EnableInt(eDRVSPI_PORT1, SPI1_Callback, 0);
+	DrvSPI_SetClockFreq(eDRVSPI_PORT1, 500000, 0);
+  */
+     /*
+    //Configure SPI0 related multi-function pins 
+    DrvGPIO_InitFunction(E_FUNC_SPI0);   
+    // Configure SPI0 as a master, 32-bit transaction   
+    DrvSPI_Open(eDRVSPI_PORT0, eDRVSPI_MASTER, eDRVSPI_TYPE1, 8);   
+    // Enable the automatic slave select function of SS0.
+    DrvSPI_DisableAutoSS(eDRVSPI_PORT0);
+    //DrvSPI_EnableAutoSS(eDRVSPI_PORT0, eDRVSPI_SS0);   
+    // Set the active level of slave select.  
+    DrvSPI_SetSlaveSelectActiveLevel(eDRVSPI_PORT0, eDRVSPI_ACTIVE_LOW_FALLING);   
+    // SPI clock rate 2MHz
+    DrvSPI_SetClockFreq(eDRVSPI_PORT0, 500000, 0);  
+    */
+}
+void char_to_string(){
+}
+int Comparison_UID_DataBase(){
+    int foundTag = 0;            // 是否找到紀錄中的標籤，預設為「否」。 
+      sprintf(UID_TEMP,"%x%x%x%x", UID[0],UID[1],UID[2],UID[3]);
+
+      for (unsigned char i=0; i<totalTags; i++) {
+         sprintf(UID_TEMP_DATABASE,"%x%x%x%x", tags[i].uid[0],tags[i].uid[1],tags[i].uid[2],tags[i].uid[3]);
+         if(strcmp(UID_TEMP,UID_TEMP_DATABASE)==0) {
+          foundTag = 1;  // 設定成「找到標籤了！」
+          return 1;
+          break;            // 退出for迴圈
+        }
+      }
+ 
+      if (!foundTag) {    // 若掃描到紀錄之外的標籤，則顯示"Wrong card!"。
+        return 0; 
+        
+      }
+}
+void Init_RFID(){
+    PcdReset();
+    PcdAntennaOn();
+}
+int RFID_Reader(){
+  if(PcdRequest(0x52,Temp)==MI_OK){
+    if(PcdAnticoll(UID)==MI_OK){
+    return 1;
+    }
+  else return 0;
+  }
+}
+void Auto_Reader(void)
+{
+	//char Text[16];
+        char UID_READ[16];
+        char UID_DATABASE[16];
+        char UID1[4]={206,236,134,91};
+
+  while(1)
+  {
+ 
+    if(PcdRequest(0x52,Temp)==MI_OK)
+    {
+      if(Temp[0])  print_lcd(1,"         ");
+      /*if(Temp[0]==0x04&&Temp[1]==0x00)  
+				print_lcd(1,"MFOne-S50    ");
+      else if(Temp[0]==0x02&&Temp[1]==0x00)
+				print_lcd(1,"MFOne-S70    ");
+      else if(Temp[0]==0x44&&Temp[1]==0x00)
+				print_lcd(1,"MF-UltraLight");
+      else if(Temp[0]==0x08&&Temp[1]==0x00)
+				print_lcd(1,"MF-Pro       ");
+      else if(Temp[0]==0x44&&Temp[1]==0x03)
+				print_lcd(1,"MF Desire    ");
+      else
+        print_lcd(1,"Unknown Card ");*/
+			
+      if(PcdAnticoll(UID)==MI_OK)
+      { 
+	//DrvSYS_Delay(500000);	// delay 
+        sprintf(UID_READ,"%x%x%x%x", UID[0],UID[1],UID[2],UID[3]);
+        sprintf(UID_DATABASE,"%x%x%x%x", UID1[0],UID1[1],UID1[2],UID1[3]);
+        sprintf(UID_TEMP_DATABASE,"%x%x%x%x", tags[0].uid[0],tags[0].uid[1],tags[0].uid[2],tags[0].uid[3]);
+        sprintf(Text,"%x%x%x%x", UID[0],UID[1],UID[2],UID[3]);
+        if(strcmp(UID_READ,UID_TEMP_DATABASE)==0) {
+              // set RGBled to Green
+              //RGBLED_CONTROL(0,1,0);
+              RGBLEDMOD_CONTROL(0,1,0);
+              print_lcd(2,"confirm!");
+              print_lcd(3,Text);
+              DrvGPIO_ClrBit(E_GPA,10);
+              DrvSYS_Delay(1000000);
+              break;
+        }
+        else {
+              // set RGBled to Red
+              //RGBLED_CONTROL(1,0,0);
+              RGBLEDMOD_CONTROL(1,0,0);
+              print_lcd(2,"Deny!     ");
+              print_lcd(3,Text);
+              DrvGPIO_SetBit(E_GPA,10);
+              DrvSYS_Delay(1000000);
+        }
+        //while (!(IFG1 & UTXIFG0));
+        //TXBUF0 = '\n';*/
+        break;
+      }
+			/*else 
+			  print_lcd(2,"UID :           ");*/
+    }
+                        else{ 
+                        //RGBLED_CONTROL(0,0,0);
+                        RGBLEDMOD_CONTROL(0,0,0);
+                        DrvGPIO_SetBit(E_GPA,10);
+                        print_lcd(1,"                ");
+			print_lcd(2,"No Card     ");    
+                        print_lcd(3,"          ");}
+  } 
+}
+// Initial GPIO pins (GPA 12, 13, 14) to Output mode  
+void Init_GPIO()
+{
+    int i;
+        
+      
+    // GPA12~14, GPC12~15, GPB11, GPD14 pin set to output mode
+    // RED LED
+    for(i=12;i<15;i++){		
+        DrvGPIO_Open(E_GPA, i, E_IO_OUTPUT);
+    }
+    // RGB LED
+    for(i=12;i<16;i++){		
+	DrvGPIO_Open(E_GPC, i, E_IO_OUTPUT);
+    }
+    // Buzzer
+    DrvGPIO_Open(E_GPB, 11, E_IO_OUTPUT);
+    // LCD Back Light
+    DrvGPIO_Open(E_GPD, 14, E_IO_OUTPUT);
+    
+    // set output High to turn off
+    for(i=12;i<15;i++){		
+        DrvGPIO_SetBit(E_GPA, i);
+    }
+    for(i=12;i<16;i++){	
+	DrvGPIO_SetBit(E_GPC, i);
+    }
+    DrvGPIO_SetBit(E_GPB, 11);
+    DrvGPIO_SetBit(E_GPD, 14);
+}
+void RGBLED_CONTROL(char Red, char Green, char Blue){
+  
+  if (Red==1){
+    DrvGPIO_ClrBit(E_GPA,14);
+  }
+  else{
+    DrvGPIO_SetBit(E_GPA,14);
+  }
+  
+  if (Green==1){
+    DrvGPIO_ClrBit(E_GPA,13);
+  }
+  else{
+    DrvGPIO_SetBit(E_GPA,13);
+  }
+  
+  if (Blue==1){
+    DrvGPIO_ClrBit(E_GPA,12);
+  }
+  else{
+    DrvGPIO_SetBit(E_GPA,12);
+  }
+}
+void RGBLEDMOD_CONTROL(char Red, char Green, char Blue){
+  
+  if (Red!=1){
+    DrvGPIO_ClrBit(E_GPA,14);
+  }
+  else{
+    DrvGPIO_SetBit(E_GPA,14);
+  }
+  
+  if (Green!=1){
+    DrvGPIO_ClrBit(E_GPA,13);
+  }
+  else{
+    DrvGPIO_SetBit(E_GPA,13);
+  }
+  
+  if (Blue!=1){
+    DrvGPIO_ClrBit(E_GPA,12);
+  }
+  else{
+    DrvGPIO_SetBit(E_GPA,12);
+  }
+}
+void Confirm_Callback(void)
+{
+    
+    //顯示confirm以及一短音
+    print_lcd(2,"Confirm!!    ");
+    
+    for(int i=0;i<1;i++){
+        RGBLEDMOD_CONTROL(0,1,0);
+        //DrvGPIO_ClrBit(E_GPB,11);
+        DrvSYS_Delay(85000);
+        RGBLEDMOD_CONTROL(0,0,0);
+        //DrvGPIO_SetBit(E_GPB,11);
+        DrvSYS_Delay(250000);
+    }
+    
+    for(int i=0;i<4;i++){
+        DrvSYS_Delay(250000);
+    }
+    RGBLEDMOD_CONTROL(0,0,0);
+    //print_lcd(3,"          ");
+}
+void Deny_Callback(void)
+{
+    
+    //顯示deny以及三短音
+    print_lcd(2,"Deny!!     ");
+    
+    for(int i=0;i<3;i++){
+        RGBLEDMOD_CONTROL(1,0,0);
+       // DrvGPIO_ClrBit(E_GPB,11);
+        DrvSYS_Delay(85000);
+        RGBLEDMOD_CONTROL(0,0,0);
+        //DrvGPIO_SetBit(E_GPB,11);
+        DrvSYS_Delay(250000);
+    }
+    
+    for(int i=0;i<4;i++){
+        DrvSYS_Delay(250000);
+    }
+    RGBLEDMOD_CONTROL(0,0,0);
+    //print_lcd(3,"          ");
+}
+void Relay(){
+DrvGPIO_ClrBit(E_GPA,10);
+DrvSYS_Delay(250000);
+DrvGPIO_SetBit(E_GPA,10);
+}
